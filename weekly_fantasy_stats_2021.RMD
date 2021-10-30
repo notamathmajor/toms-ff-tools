@@ -1,0 +1,373 @@
+---
+title: "Tom Uses NFLFastR"
+
+---
+```{r,echo=F}
+rm(list=ls())
+setwd("C:\\Users\\Thomas\\Desktop\\data\\nfl\\TSD")
+```
+
+#Setup
+Packages and year + week inputs
+```{r,echo=F,message=F,warning=F}
+library(nflfastR)
+library(tidyverse)
+library(furrr)
+library(stringr)
+
+##inputs:
+this_year = 2021
+last_week = 7
+has_run = TRUE
+```
+
+Helper fxns
+```{r}
+tg_trunc_d <- function(n,digits){
+  a <- trunc(n*10^digits)/10^digits
+  return(a)
+}
+```
+
+
+#Gather play-by-play Data
+```{r, message=F}
+#don't ask
+#closeAllConnections()
+
+#get list of game ids from chosen year
+game_id_list <- 
+  fast_scraper_schedules(this_year) %>%
+  filter(week<=last_week) %>%
+  #filter(away_score != "NA") %>%
+  pull(game_id)
+
+
+#pbp is our data frame
+# parallel fix added, still takes a second
+future::plan("multisession", gc=TRUE)
+pbp <- build_nflfastR_pbp(game_id_list)
+
+#clean up
+#rm(game_id_list)
+#rm(last_week)
+#rm(this_year)
+```
+
+Check Table (optional)
+```{r}
+#head(pbp)
+
+#output (helpful for finding summary columns)
+write.csv(pbp, file="pbp.csv")
+```
+
+#Transform play-by-play to Weekly
+Set parameters
+```{r}
+min_pass_att = 1
+min_rush_att = 1
+min_tgt      = 1
+```
+
+
+Passing Stats
+```{r}
+pa.data <- pbp %>%
+  filter(play_type=="pass") %>%
+  group_by(passer, posteam, game_id) %>%
+  summarise(
+    id = paste0(passer, game_id),
+    gid = paste0(posteam, game_id),
+    pa.yds = sum(passing_yards, na.rm=TRUE),
+    pa.tds = sum(touchdown),
+    wpa = tg_trunc_d(sum(air_wpa, na.rm=TRUE),3),
+    epa = tg_trunc_d(sum(qb_epa),2),
+    pa.cmp = sum(complete_pass, na.rm=TRUE),
+    pa.att = sum(pass_attempt, na.rm=TRUE),
+    pa.cmp_pct = tg_trunc_d(pa.cmp / pa.att,3),
+    pa.cpo = tg_trunc_d(mean(cpoe, na.rm = TRUE),2),
+    pa.sck = sum(sack),
+    pa.int = sum(interception),
+    pa.1st = sum(first_down),
+    pa.air = sum(air_yards, na.rm = TRUE),
+    pa.dpb = sum(qb_dropback),
+    pa.prob_dpb = tg_trunc_d(mean(xpass, na.rm=TRUE),3),
+    pa.dpb_oe = tg_trunc_d(mean(pass_oe, na.rm=TRUE),3),
+    pa.frc = sum(fumble_forced),
+    pa.lst = sum(fumble_lost)
+  ) %>% 
+  filter(pa.att >= min_pass_att) %>% 
+  arrange(desc(pa.yds))
+pa.data <- pa.data[!duplicated(pa.data),]
+#head(pa.data, 25)
+#write.csv(pa.data, file="pa.csv")
+```
+
+Rushing Stats
+```{r}
+ru.data <- pbp %>%
+  filter(play_type=="run") %>%
+  group_by(rusher, posteam, game_id) %>%
+  summarise(
+    id = paste0(rusher, game_id),
+    gid = paste0(posteam, game_id),
+    ru.yds = sum(rushing_yards, na.rm=TRUE),
+    ru.tds = sum(touchdown),
+    wpa = tg_trunc_d(sum(wpa, na.rm=TRUE),3),
+    epa = tg_trunc_d(sum(epa),2),
+    ru.att = sum(rush_attempt, na.rm=TRUE),
+    ru.1st = sum(first_down),
+    ru.20z = sum(yardline_100<=20),
+    ru.10z = sum(yardline_100<=10),
+    ru.frc = sum(fumble_forced),
+    ru.lst = sum(fumble_lost)
+  ) %>%
+  filter(ru.att >= min_rush_att) %>% 
+  arrange(desc(ru.yds))
+ru.data <- ru.data[!duplicated(ru.data),]
+#head(ru.data, 25)
+#write.csv(ru.data, file="ru.csv")
+```
+
+Receiving Stats
+```{r}
+re.data <- pbp %>%
+  filter(play_type=="pass") %>%
+  group_by(receiver, posteam, game_id) %>%
+  summarise(
+    id = paste0(receiver,game_id),
+    gid = paste0(posteam, game_id),
+    re.yds = sum(passing_yards, na.rm=TRUE),
+    re.tds = sum(touchdown),
+    wpa = tg_trunc_d(sum(comp_yac_wpa, na.rm=TRUE),3),
+    epa = tg_trunc_d(sum(comp_yac_epa),2),
+    re.cat = sum(complete_pass, na.rm=TRUE), 
+    re.tgt = sum(pass_attempt, na.rm=TRUE),
+    re.cat_pct = tg_trunc_d(re.cat / re.tgt,3),
+    re.cpo = tg_trunc_d(sum(cpoe, na.rm = TRUE) / re.cat,2),
+    re.1st = sum(first_down),
+    re.air = sum(air_yards, na.rm = TRUE),
+    re.yac = sum(yards_after_catch, na.rm = TRUE),
+    re.xyc = tg_trunc_d(sum(xyac_median_yardage, na.rm = TRUE),1),
+    re.frc = sum(fumble_forced),
+    re.lst = sum(fumble_lost)
+  ) %>% 
+  filter(re.tgt >= min_tgt) %>% 
+  arrange(desc(re.yds))
+re.data <- re.data[!duplicated(re.data),]
+#head(re.data, 25)
+#write.csv(re.data, file="re.csv")
+```
+
+Team Volume Stats
+```{r}
+tm.data <- pbp %>% 
+  group_by(posteam, game_id) %>% 
+  summarise(
+    gid = paste0(posteam, game_id),
+    tm.yds = sum(yards_gained, na.rm = TRUE),
+    tm.tds = sum(touchdown, na.rm=TRUE),
+    tm.tgt = sum(complete_pass, na.rm = TRUE),
+    tm.rat = sum(rush_attempt, na.rm = TRUE),
+    tm.pyd = sum(passing_yards, na.rm = TRUE),
+    tm.air = sum(air_yards, na.rm = TRUE),
+    tm.ryd = sum(rushing_yards, na.rm = TRUE),
+    tm.20z = sum(yardline_100<=20 & play_type == "run", na.rm = TRUE),
+    tm.10z = sum(yardline_100<=10 & play_type == "run", na.rm = TRUE)
+  )
+tm.data <- tm.data[!duplicated(tm.data),]
+#head(tm.data,10)
+```
+
+#Data Cleaning
+Create one Weekly stats dataframe
+```{r}
+#join team stats into each category (pass, rush, rec)
+tm.pa <- pa.data %>% 
+  full_join(tm.data, by="gid") %>% 
+  na.omit()
+tm.pa <- tm.pa[!duplicated(tm.pa),]
+
+tm.ru <- ru.data %>% 
+  full_join(tm.data, by="gid") %>% 
+  na.omit()
+tm.ru <- tm.ru[!duplicated(tm.ru),]
+
+tm.re <- re.data %>% 
+  full_join(tm.data, by="gid") %>% 
+  na.omit()
+tm.re <- tm.re[!duplicated(tm.re),]
+#head(tm.pa)
+
+
+#join categories into one dataset
+#this can take a long time
+wk.data <- tm.pa %>% 
+  full_join(tm.ru, by="id")
+wk.data <- wk.data %>% 
+  full_join(tm.re, by="id")
+#head(wk.data)
+```
+
+Remove wasteful columns and reformat data
+```{r}
+#organize player names, teams, gameid, wpa, epa, tm stats
+player <- wk.data$passer
+tm <- wk.data$posteam.x.x
+game_id <- wk.data$game_id.x.x
+wpa <- wk.data$wpa.x
+epa <- wk.data$epa.x
+tm.tot.yds <- wk.data$tm.yds.x
+tm.tot.tds <- wk.data$tm.tds.x
+tm.rushes  <- wk.data$tm.rat.x
+tm.target  <- wk.data$tm.tgt.x
+tm.pyards  <- wk.data$tm.pyd.x
+tm.ayards  <- wk.data$tm.air.x
+tm.ryards  <- wk.data$tm.ryd.x
+tm.20zone  <- wk.data$tm.20z.x
+tm.10zone  <- wk.data$tm.10z.x
+#sum(is.na(player))
+tm[is.na(player)]       <- wk.data$posteam.x.y[is.na(wk.data$passer)]
+game_id[is.na(player)]  <- wk.data$game_id.x.y[is.na(wk.data$passer)]
+wpa[is.na(player)]      <- wk.data$wpa.y[is.na(wk.data$passer)]
+epa[is.na(player)]      <- wk.data$epa.y[is.na(wk.data$passer)]
+tm.tot.yds[is.na(player)] <- wk.data$tm.yds.x[is.na(wk.data$passer)]
+tm.tot.tds[is.na(player)] <- wk.data$tm.tds.x[is.na(wk.data$passer)]
+tm.rushes[is.na(player)]  <- wk.data$tm.rat.x[is.na(wk.data$passer)]
+tm.target[is.na(player)]  <- wk.data$tm.tgt.x[is.na(wk.data$passer)]
+tm.pyards[is.na(player)]  <- wk.data$tm.pyd.x[is.na(wk.data$passer)]
+tm.ayards[is.na(player)]  <- wk.data$tm.air.x[is.na(wk.data$passer)]
+tm.ryards[is.na(player)]  <- wk.data$tm.ryd.x[is.na(wk.data$passer)]
+tm.20zone[is.na(player)]  <- wk.data$tm.20z.x[is.na(wk.data$passer)]
+tm.10zone[is.na(player)]  <- wk.data$tm.10z.x[is.na(wk.data$passer)]
+#player goes last
+player[is.na(player)]   <- wk.data$rusher[is.na(wk.data$passer)]
+
+tm[is.na(player)]       <- wk.data$posteam.x[is.na(wk.data$passer)&is.na(wk.data$rusher)]
+game_id[is.na(player)]  <- wk.data$game_id.x[is.na(wk.data$passer)&is.na(wk.data$rusher)]
+wpa[is.na(player)]      <- wk.data$wpa[is.na(wk.data$passer)&is.na(wk.data$rusher)]
+epa[is.na(player)]      <- wk.data$epa[is.na(wk.data$passer)&is.na(wk.data$rusher)]
+tm.tot.yds[is.na(player)] <- wk.data$tm.yds[is.na(wk.data$passer)&is.na(wk.data$rusher)]
+tm.tot.tds[is.na(player)] <- wk.data$tm.tds[is.na(wk.data$passer)&is.na(wk.data$rusher)]
+tm.rushes[is.na(player)]  <- wk.data$tm.rat[is.na(wk.data$passer)&is.na(wk.data$rusher)]
+tm.target[is.na(player)]  <- wk.data$tm.tgt[is.na(wk.data$passer)&is.na(wk.data$rusher)]
+tm.pyards[is.na(player)]  <- wk.data$tm.pyd[is.na(wk.data$passer)&is.na(wk.data$rusher)]
+tm.ayards[is.na(player)]  <- wk.data$tm.air[is.na(wk.data$passer)&is.na(wk.data$rusher)]
+tm.ryards[is.na(player)]  <- wk.data$tm.ryd[is.na(wk.data$passer)&is.na(wk.data$rusher)]
+tm.20zone[is.na(player)]  <- wk.data$tm.20z[is.na(wk.data$passer)&is.na(wk.data$rusher)]
+tm.10zone[is.na(player)]  <- wk.data$tm.10z[is.na(wk.data$passer)&is.na(wk.data$rusher)]
+#player goes last
+player[is.na(player)]   <- wk.data$receiver[
+                                          is.na(wk.data$passer) & 
+                                          is.na(wk.data$rusher)
+                                         ]
+
+#add as columns and remove originals plus some junk from merging
+d1 <- c("passer","rusher","receiver","posteam.x","posteam.x.x","posteam.x.y","posteam.y","posteam.y.x","posteam.y.y","game_id.y","game_id.x","game_id.y.y","game_id.x.y","game_id.x.x","game_id.y.x","wpa.x","wpa.y","wpa","epa.x","epa.y","epa","gid","gid.x","gid.y","tm.yds.x","tm.tds.x","tm.tgt.x","tm.rat.x","tm.pyd.x","tm.air.x","tm.ryd.x","tm.20z.x","tm.10z.x","tm.yds.y","tm.tds.y","tm.tgt.y","tm.rat.y","tm.pyd.y","tm.air.y","tm.ryd.y","tm.20z.y","tm.10z.y","tm.yds","tm.tds","tm.tgt","tm.rat","tm.pyd","tm.air","tm.ryd","tm.20z","tm.10z")
+
+wk.data <- cbind(player,
+                 tm,
+                 game_id,
+                 wpa,
+                 epa,
+                 wk.data[,!names(wk.data) %in% d1],
+                 tm.tot.yds,
+                 tm.tot.tds,
+                 tm.rushes,
+                 tm.target,
+                 tm.pyards,
+                 tm.ayards,
+                 tm.ryards,
+                 tm.20zone,
+                 tm.10zone
+                 )
+
+
+#optional export
+wk.data0<-wk.data
+wk.data0[is.na(wk.data0)]=0
+
+write.csv(wk.data0,"2021-wk-data.csv")
+
+#dataset for fantasy
+fantasy.cols <- c(
+  "player",
+  "tm",
+  "game_id",
+  "pa.yds",
+  "pa.tds",
+  "pa.int",
+  #"pa.1st",
+  "ru.yds",
+  "ru.tds",
+  "ru.lst",
+  #"ru.att",
+  #"ru.1st",
+  "re.yds",
+  "re.tds",
+  "re.cat"
+  #"re.1st"
+  #add other fantasy columns here as needed
+)
+ff.data <- wk.data[,names(wk.data) %in% fantasy.cols]
+#head(ff.data)
+write.csv(ff.data,"2021-ff-data.csv")
+```
+
+
+Output as csvs (optional)
+```{r}
+# write.csv(tm.pa[!duplicated(tm.pa),], "tm-pa.csv")
+# write.csv(tm.ru[!duplicated(tm.ru),], "tm-ru.csv")
+# write.csv(tm.re[!duplicated(tm.re),], "tm-re.csv")
+# write.csv(wk.data,"wk-data.csv")
+# write.csv(tm.data[!duplicated(tm.data),],"tm-data.csv")
+```
+
+#Data Cleaning pt. II (under construction)
+Create one weekly stats dataframe
+```{r}
+# pl.data <- pa.data %>% 
+#   full_join(ru.data,by="id") %>% 
+#   na.omit()
+# pl.data <- pl.data %>% 
+#   full_join(re.data,by="id") %>% 
+#   na.omit()
+# head(pl.data,10)
+# wk.data2 <- pl.data %>% 
+#   full_join(tm.data,by="gid") %>% 
+#   na.omit()
+# head(wk.data2,10)
+dpcols1 <- c("posteam","desc","play_type","yards_gained","td_player_name","touchdown")
+has_run = TRUE
+
+if(!has_run){
+  
+  pbp <- read.csv("pbp.csv")
+  last_week = max(pbp$week)
+  wk.data0 <- read.csv("2021-wk-data.csv")
+  
+}
+
+wk.df <- pbp[pbp$week==last_week,dpcols1]
+dpdf <- wk.df[ (wk.df$yards_gained>=50 & 
+                  wk.df$touchdown == 1) 
+               | 
+               wk.df$yards_gained==69,]
+
+print(dpdf[order(-dpdf$yards_gained),])
+
+dpcols2 <- c("player","game_id","pa.yds","pa.tds","ru.yds","ru.tds","re.yds","re.tds")
+wkd <- wk.data0[substr(wk.data0$game_id,1,7)==paste0(this_year&"_"&format(this_week,)))]
+achi <- (wkd$pa.tds+wkd$ru.tds+wkd$re.tds)>=5 | 
+            (wkd$ru.tds+wkd$re.tds)>=3 |
+            wkd$ru.yds>=150 |
+            wkd$re.yds>=150 |
+            (wkd$ru.yds+wkd$re.yds)>=250 |
+            wkd$pa.yds>=500
+dpdf <- wkd[achi,
+            dpcols2]
+print(dpdf)
+```
+
